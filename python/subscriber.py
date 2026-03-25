@@ -2,6 +2,7 @@ from google.cloud import pubsub_v1
 import json
 from fetch_hashes import fetch_hashes
 from compare import hamming_distance
+from alert_store import store_alert  
 
 project_id = "bwai-solution-challenge"
 subscription_id = "video-frames-sub"
@@ -11,6 +12,11 @@ subscription_path = subscriber.subscription_path(project_id, subscription_id)
 
 stored_hashes = fetch_hashes()
 
+# ✅ Confidence function (keep above callback)
+def calculate_confidence(distance):
+    return max(0, 100 - distance)
+
+
 def callback(message):
     print("📩 Message received!")
 
@@ -19,27 +25,33 @@ def callback(message):
 
     print("🔍 Processing hash...")
 
-    match_found = False  # ✅ flag
+    match_found = False
 
     for stored_hash in stored_hashes:
         distance = hamming_distance(incoming_hash, stored_hash)
 
         if distance < 10:
-            print("🚨 REAL-TIME MATCH DETECTED!")
-            match_found = True
-            break  # stop after first match
+            confidence = calculate_confidence(distance)
 
-    # ✅ If no match found
+            print(f"🚨 MATCH DETECTED (Confidence: {confidence}%)")
+
+            # ✅ Store alert in Firestore
+            store_alert("match1", confidence)
+
+            match_found = True
+            break
+
     if not match_found:
         print("❌ NOT DETECTED")
 
     message.ack()
-# ✅ Proper streaming setup
+
+
+# ✅ Start subscriber
 streaming_pull_future = subscriber.subscribe(subscription_path, callback=callback)
 
 print("📡 Listening for messages...")
 
-# ✅ THIS IS THE FIX (blocking context)
 with subscriber:
     try:
         streaming_pull_future.result(timeout=None)
