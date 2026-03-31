@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   BarChart,
   Bar,
@@ -18,8 +18,8 @@ interface Alert {
   confidence: number;
   risk_score: number;
   region: string;
-  response: string;   // 🔥 NEW
-  level: string;      // 🔥 NEW
+  response: string;
+  level: string;
 }
 
 export default function Dashboard() {
@@ -27,33 +27,49 @@ export default function Dashboard() {
   const [regionData, setRegionData] = useState<any[]>([]);
   const [soundEnabled, setSoundEnabled] = useState(false);
 
-  // 🔊 Enable sound
+  // 🔥 We use refs to track state silently inside the setInterval without causing bugs
+  const soundEnabledRef = useRef(false);
+  const lastAlertIdRef = useRef<string | null>(null);
+
+  // 🔊 Enable sound on click
   useEffect(() => {
     const enableSound = () => {
       setSoundEnabled(true);
+      soundEnabledRef.current = true; // Update the ref immediately for the interval
       window.removeEventListener("click", enableSound);
     };
     window.addEventListener("click", enableSound);
+    
+    return () => {
+      window.removeEventListener("click", enableSound);
+    };
   }, []);
 
-  const playAlertSound = () => {
-    if (!soundEnabled) return;
-    const audio = new Audio(
-      "https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg"
-    );
-    audio.play().catch(() => {});
-  };
-
-  // 🔁 Fetch alerts
+  // 🔁 Fetch alerts (Fixed the useEffect Dependency Bug)
   useEffect(() => {
     const fetchAlerts = async () => {
       try {
         const res = await fetch("http://localhost:5000/api/alerts");
+        
+        // Failsafe in case the backend returns a non-JSON error page
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        
         const data = await res.json();
 
-        // 🔥 Play sound only for NEW alerts
-        if (alerts.length > 0 && data[0]?.id !== alerts[0]?.id) {
-          playAlertSound();
+        // Play sound if there is a NEW alert and sound is enabled
+        const latestAlertId = data[0]?.id;
+        if (lastAlertIdRef.current && latestAlertId !== lastAlertIdRef.current) {
+          if (soundEnabledRef.current) {
+            const audio = new Audio(
+              "https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg"
+            );
+            audio.play().catch(() => {}); // Catch prevents errors if browser blocks autoplay
+          }
+        }
+        
+        // Update our silent tracker
+        if (latestAlertId) {
+          lastAlertIdRef.current = latestAlertId;
         }
 
         setAlerts(data);
@@ -64,22 +80,25 @@ export default function Dashboard() {
           counts[region] = (counts[region] || 0) + 1;
         });
 
-        const chartData = Object.keys(counts).map((key) => ({
+        const chart = Object.keys(counts).map((key) => ({
           region: key,
           count: counts[key],
         }));
 
-        setRegionData(chartData);
-      } catch (err) {
-        console.error(err);
+        setRegionData(chart);
+      } catch (error) {
+        // This will quietly log if your backend is offline instead of crashing the app
+        console.error("Failed to fetch alerts. Is localhost:5000 running?", error);
       }
     };
 
     fetchAlerts();
     const interval = setInterval(fetchAlerts, 2000);
+    
     return () => clearInterval(interval);
-  }, [alerts]);
+  }, []); // 🔥 EMPTY ARRAY: Interval starts once and never restarts!
 
+  // Helper functions for dynamic styling
   const getRiskColor = (risk: number) => {
     if (risk > 80) return "bg-red-500";
     if (risk > 60) return "bg-orange-500";
@@ -87,13 +106,13 @@ export default function Dashboard() {
   };
 
   const getLevelColor = (level: string) => {
-    if (level === "HIGH") return "text-red-400";
-    if (level === "MEDIUM") return "text-orange-400";
-    return "text-yellow-400";
+    if (level === "HIGH") return "text-red-600";
+    if (level === "MEDIUM") return "text-orange-500";
+    return "text-yellow-600";
   };
 
-  // 🌍 Map positions
-  const positions: any = {
+  // 🌍 Exact Map positions
+  const positions: Record<string, { top: string; left: string }> = {
     India: { top: "55%", left: "65%" },
     US: { top: "45%", left: "25%" },
     UK: { top: "35%", left: "48%" },
@@ -102,74 +121,97 @@ export default function Dashboard() {
     Global: { top: "50%", left: "50%" },
   };
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-[#0f172a] to-[#020617] text-white p-10 font-sans">
+  const highRisk = alerts.filter((a) => a.risk_score > 80).length;
+  const avgConfidence =
+    alerts.length > 0
+      ? Math.round(
+          alerts.reduce((sum, a) => sum + a.confidence, 0) / alerts.length
+        )
+      : 0;
 
-      {/* 🔊 SOUND NOTICE */}
+  return (
+    <div className="min-h-screen bg-gray-50 p-8 text-gray-900">
+      {/* SOUND NOTICE */}
       {!soundEnabled && (
-        <div className="bg-yellow-400 text-black px-4 py-2 rounded mb-4 text-center">
+        <div className="bg-yellow-300 text-black px-4 py-2 rounded mb-4 text-center cursor-pointer shadow-sm">
           🔊 Click anywhere to enable alert sound
         </div>
       )}
 
       {/* HEADER */}
-      <header className="mb-10">
-        <h1 className="text-5xl font-extrabold text-blue-400">
-          NetraX Intelligence Dashboard
+      <div className="flex justify-between items-center mb-8">
+        <h1 className="text-3xl font-bold">
+          Netra<span className="text-blue-500">X</span>
         </h1>
-        <p className="text-gray-400 mt-2">
-          Real-time piracy detection & monitoring system
-        </p>
-      </header>
+        <span className="text-red-500 font-semibold text-sm flex items-center gap-2">
+          <span className="animate-pulse">●</span> LIVE
+        </span>
+      </div>
 
-      <div className="grid grid-cols-3 gap-8">
+      {/* STATS */}
+      <div className="grid grid-cols-3 gap-6 mb-8">
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <p className="text-gray-500 text-sm font-medium">Live Alerts Today</p>
+          <h2 className="text-3xl font-bold mt-2">{alerts.length}</h2>
+        </div>
 
-        {/* ALERTS */}
-        <div className="col-span-2 bg-[#1e293b] rounded-2xl p-6 shadow-xl border border-gray-700">
-          <h2 className="text-2xl font-bold mb-6 text-red-400">
-            🚨 Live Alerts
-          </h2>
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <p className="text-gray-500 text-sm font-medium">High-Risk Events</p>
+          <h2 className="text-3xl font-bold mt-2">{highRisk}</h2>
+        </div>
 
-          <div className="space-y-5 max-h-[70vh] overflow-y-auto">
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <p className="text-gray-500 text-sm font-medium">Avg. Confidence</p>
+          <h2 className="text-3xl font-bold mt-2">{avgConfidence}%</h2>
+        </div>
+      </div>
+
+      {/* MAIN GRID */}
+      <div className="grid grid-cols-3 gap-6">
+        {/* ALERT FEED */}
+        <div className="col-span-2 bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col">
+          <h2 className="text-lg font-semibold mb-4 shrink-0">Real-Time Event Feed</h2>
+
+          <div className="flex-1 min-h-0 overflow-y-auto pr-2 space-y-4">
             {alerts.length === 0 ? (
-              <p className="text-gray-400">Scanning streams...</p>
+              <p className="text-gray-400 italic">Waiting for alerts...</p>
             ) : (
               alerts.map((alert) => (
                 <div
                   key={alert.id}
-                  className="relative bg-[#334155] p-5 rounded-xl border border-gray-600 hover:border-red-500 transition duration-300 shadow-md hover:shadow-red-500/20 animate-pulse"
+                  className="relative overflow-hidden bg-white border border-gray-100 p-5 rounded-lg hover:bg-gray-50 transition duration-300 shadow-sm hover:shadow-md hover:border-red-200 group"
                 >
-                  <div className="absolute inset-0 bg-red-500/10 blur-xl opacity-0 hover:opacity-100"></div>
+                  <div className="absolute inset-0 bg-red-500/5 blur-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
 
-                  <div className="flex justify-between">
-                    <span className="font-bold">{alert.source}</span>
-                    <span className="text-xs">
-                      {new Date(alert.timestamp).toLocaleTimeString()}
-                    </span>
-                  </div>
+                  <div className="relative z-10 w-full">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="font-bold text-gray-800">{alert.source}</span>
+                      <span className="text-xs text-gray-500 font-medium">
+                        {new Date(alert.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
 
-                  <p className="mt-1">🎬 {alert.video_id}</p>
+                    <p className="text-gray-700 text-sm mb-1">🎬 {alert.video_id}</p>
 
-                  <p className="text-sm text-gray-400">
-                    🌍 {alert.region} | 📊 {alert.confidence}%
-                  </p>
+                    <p className="text-sm text-gray-500 mb-2">
+                      🌍 {alert.region} | 📊 {alert.confidence}%
+                    </p>
 
-                  {/* 🔥 RESPONSE SYSTEM */}
-                  <p className="text-sm mt-2 text-blue-400">
-                    ⚡ {alert.response}
-                  </p>
+                    <p className="text-sm text-blue-600 font-medium">
+                      ⚡ {alert.response}
+                    </p>
 
-                  <p className={`text-xs ${getLevelColor(alert.level)}`}>
-                    Level: {alert.level}
-                  </p>
+                    <p className={`text-xs mt-1 font-bold ${getLevelColor(alert.level)}`}>
+                      Level: {alert.level}
+                    </p>
 
-                  {/* Risk Bar */}
-                  <div className="mt-3">
-                    <div className="w-full bg-gray-600 h-2 rounded">
-                      <div
-                        className={`${getRiskColor(alert.risk_score)} h-2 rounded`}
-                        style={{ width: `${alert.risk_score}%` }}
-                      ></div>
+                    <div className="mt-3">
+                      <div className="w-full bg-gray-200 h-1.5 rounded-full overflow-hidden">
+                        <div
+                          className={`${getRiskColor(alert.risk_score)} h-1.5 rounded-full transition-all duration-500`}
+                          style={{ width: `${alert.risk_score}%` }}
+                        ></div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -178,32 +220,32 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* RIGHT SIDE */}
+        {/* RIGHT PANEL */}
         <div className="space-y-6">
+          {/* MAP */}
+          <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+            <h2 className="text-lg font-semibold mb-2">Global Activity</h2>
 
-          {/* 🌍 MAP */}
-          <div className="bg-[#1e293b] p-4 rounded-xl">
-            <h2 className="text-lg mb-3 text-orange-400">🌍 Live Map</h2>
-
-            <div className="relative w-full h-[250px] bg-[#0f172a] rounded-lg overflow-hidden">
-
+            <div className="relative w-full h-[150px] bg-blue-50/50 rounded overflow-hidden border border-gray-100">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src="https://upload.wikimedia.org/wikipedia/commons/8/80/World_map_-_low_resolution.svg"
-                className="w-full h-full opacity-40"
+                alt="World Map"
+                className="w-full h-full opacity-40 object-cover"
               />
 
               {regionData.map((r, i) => {
                 const pos = positions[r.region] || positions["Global"];
-
+                
                 return (
                   <div
                     key={i}
                     className="absolute"
                     style={{ top: pos.top, left: pos.left }}
                   >
-                    <div className="relative">
+                    <div className="relative flex items-center justify-center">
                       <div className="w-3 h-3 bg-red-500 rounded-full animate-ping absolute"></div>
-                      <div className="w-3 h-3 bg-red-500 rounded-full"></div>
+                      <div className="w-3 h-3 bg-red-500 rounded-full relative z-10"></div>
                     </div>
                   </div>
                 );
@@ -211,29 +253,46 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* 📊 CHART */}
-          <div className="bg-[#1e293b] p-4 rounded-xl">
-            <h2 className="text-lg mb-3 text-blue-400">📊 Region Stats</h2>
+          {/* REGION STATS */}
+          <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+            <h2 className="text-lg font-semibold mb-3">
+              Top Regions by Activity
+            </h2>
+
+            <div className="max-h-[200px] overflow-y-auto pr-2">
+              {regionData.map((r) => (
+                <div key={r.region} className="mb-3">
+                  <div className="flex justify-between text-sm font-medium mb-1">
+                    <span>{r.region}</span>
+                    <span>{r.count}</span>
+                  </div>
+
+                  <div className="w-full bg-gray-100 h-2 rounded-full overflow-hidden">
+                    <div
+                      className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+                      style={{ width: `${Math.min(r.count * 20, 100)}%` }}
+                    ></div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* CHART */}
+          <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+            <h2 className="text-lg font-semibold mb-3">Region Stats Chart</h2>
 
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={regionData}>
-                <XAxis dataKey="region" stroke="#ccc" />
-                <YAxis />
-                <Tooltip />
-                <Bar dataKey="count" fill="#ef4444" />
+                <XAxis dataKey="region" tick={{ fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 12 }} />
+                <Tooltip 
+                  cursor={{ fill: 'rgba(59, 130, 246, 0.1)' }}
+                  contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                />
+                <Bar dataKey="count" fill="#3b82f6" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
-          </div>
-
-          {/* 📊 SUMMARY */}
-          <div className="bg-[#1e293b] p-4 rounded-xl">
-            <h2 className="text-lg mb-3 text-green-400">📊 Overview</h2>
-
-            <p>Total Alerts: {alerts.length}</p>
-            <p>Regions: {regionData.length}</p>
-            <p>
-              High Risk: {alerts.filter((a) => a.risk_score > 80).length}
-            </p>
           </div>
         </div>
       </div>
