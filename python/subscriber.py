@@ -193,7 +193,7 @@ def callback(message):
                         "distance": min_distance
                     },
                     "timestamp": firestore.SERVER_TIMESTAMP,
-                    "source": "Simulated Stream"
+                    "source": data.get("source", "Simulated Stream"),
                 })
 
                 print("✅ Classified Alert Stored to Firestore")

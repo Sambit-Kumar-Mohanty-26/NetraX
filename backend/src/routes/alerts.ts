@@ -37,9 +37,9 @@ router.get("/alerts", async (req, res) => {
         id: doc.id,
         video_id: data.video_id || "unknown",
         confidence: data.confidence || 0,
-        embedding_score: data.embedding_score || null,
-        misuse_category: data.misuse_category || null,    
-        misuse_reasoning: data.misuse_reasoning || null,  
+        embedding_score: data.embedding_score || null,  
+        misuse_category: data.misuse_category || null,    // 🔥 NEW: Pass Gemini category
+        misuse_reasoning: data.misuse_reasoning || null,  // 🔥 NEW: Pass Gemini reasoning
         risk_score: data.risk_score || 0,
         region: data.region || "unknown",
         status: data.status || "UNKNOWN",
