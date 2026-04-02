@@ -16,8 +16,13 @@ const server = http.createServer(app);
 // Socket.IO WebSocket server
 const io = new Server(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    methods: ["GET", "POST"]
+    origin: [
+      "http://localhost:3000",  // Local development
+      process.env.FRONTEND_URL || "",  // Production (Vercel URL)
+      /\.vercel\.app$/  // Allow all Vercel preview deployments
+    ].filter(Boolean),
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
