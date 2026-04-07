@@ -94,11 +94,12 @@ RESPOND ONLY in this exact JSON format:
 
 Do NOT respond with any other text. Only valid JSON."""
 
-        logger.info("📤 Sending frame to Gemini 2.0 Flash Vision API...")
+        logger.info("📤 Sending frame to Gemini Vision API...")
         
-        # Call Gemini 2.0 with vision capability
+        # Call Gemini with vision capability
+        # Use gemini-2.5-flash-lite (lightweight, widely available)
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash-lite",
             contents=[
                 prompt,
                 {
@@ -186,7 +187,7 @@ Respond ONLY in JSON format:
 {{"category": "...", "reasoning": "...", "confidence": 0.0}}"""
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash-lite",
             contents=prompt
         )
         

@@ -23,6 +23,7 @@ google-api-python-client>=2.100.0
 tensorflow>=2.20.0
 mediapipe>=0.10.9
 deepface>=0.0.79
+protobuf>=6.31.0  # Fixed: Ensure protobuf version compatibility
 
 # === HTTP & APIs ===
 requests>=2.31.0
