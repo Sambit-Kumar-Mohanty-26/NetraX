@@ -3,8 +3,14 @@ import admin from "firebase-admin";
 import path from "path";
 import fs from "fs";
 import { GoogleGenAI } from "@google/genai"; // 🔥 NEW: Unified Google Gen AI SDK
+import { createRateLimiter, requireApiGuard, sanitizeIdentifier } from "../middleware/security";
 
 const router = express.Router();
+const alertsPostRateLimit = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 8,
+  keyPrefix: "alerts-post",
+});
 
 // Load Firebase credentials - supports multiple sources
 let serviceAccount: any;
@@ -51,13 +57,17 @@ const ai = new GoogleGenAI({
 // Fetch Alerts Feed
 router.get("/alerts", async (req, res) => {
   try {
-    const snapshot = await db
-      .collection("alerts")
-      .orderBy("timestamp", "desc")
-      .limit(20)
-      .get();
+    // Fetch from BOTH collections to show all alerts
+    const [piracySnapshot, oldAlertsSnapshot] = await Promise.all([
+      db.collection("piracy_alerts").orderBy("timestamp", "desc").limit(20).get(),
+      db.collection("alerts").orderBy("timestamp", "desc").limit(20).get()
+    ]);
 
-    const alerts = snapshot.docs.map((doc: any) => {
+    // Combine both collections
+    const allAlerts: any[] = [];
+    
+    // Process piracy_alerts (from upload processor)
+    piracySnapshot.docs.forEach((doc: any) => {
       const data = doc.data();
       let formattedTimestamp = data.timestamp;
 
@@ -65,9 +75,15 @@ router.get("/alerts", async (req, res) => {
         formattedTimestamp = new Date(formattedTimestamp._seconds * 1000).toISOString();
       }
 
-      return {
+      allAlerts.push({
         id: doc.id,
         video_id: data.video_id || "unknown",
+        url: data.url || null,
+        asset_id: data.asset_id || null,
+        source_platform: data.source_platform || null,
+        source_url: data.source_url || data.url || null,
+        parent_asset_id: data.parent_asset_id || null,
+        lineage_score: data.lineage_score || null,
         confidence: data.confidence || 0,
         embedding_score: data.embedding_score || null,  
         misuse_category: data.misuse_category || null,    
@@ -77,15 +93,126 @@ router.get("/alerts", async (req, res) => {
         status: data.status || "UNKNOWN",
         source: data.source || "unknown",
         response: data.response || "No action",   
-        level: data.level || "UNKNOWN",           
+        level: data.level || "UNKNOWN",
+        // 🌐 NEW: External source fields
+        platform: data.platform || null,
+        external_metadata: data.external_metadata || null,
+        similarity_score: data.similarity_score || data.confidence || 0,
         timestamp: formattedTimestamp,
-      };
+      });
     });
+    
+    // Process old alerts (from subscriber.py)
+    oldAlertsSnapshot.docs.forEach((doc: any) => {
+      const data = doc.data();
+      let formattedTimestamp = data.timestamp;
 
-    res.json(alerts);
+      if (formattedTimestamp && formattedTimestamp._seconds) {
+        formattedTimestamp = new Date(formattedTimestamp._seconds * 1000).toISOString();
+      }
+
+      allAlerts.push({
+        id: doc.id,
+        video_id: data.video_id || "unknown",
+        url: data.url || null,
+        asset_id: data.asset_id || null,
+        source_platform: data.source_platform || null,
+        source_url: data.source_url || data.url || null,
+        parent_asset_id: data.parent_asset_id || null,
+        lineage_score: data.lineage_score || null,
+        confidence: data.confidence || 0,
+        embedding_score: data.embedding_score || null,  
+        misuse_category: data.misuse_category || null,    
+        misuse_reasoning: data.misuse_reasoning || null,  
+        risk_score: data.risk_score || 0,
+        region: data.region || "unknown",
+        status: data.status || "UNKNOWN",
+        source: data.source || "unknown",
+        response: data.response || "No action",   
+        level: data.level || "UNKNOWN",
+        // 🌐 NEW: External source fields
+        platform: data.platform || null,
+        external_metadata: data.external_metadata || null,
+        similarity_score: data.similarity_score || data.confidence || 0,
+        timestamp: formattedTimestamp,
+      });
+    });
+    
+    // Sort all alerts by timestamp (newest first)
+    allAlerts.sort((a, b) => {
+      const timeA = new Date(a.timestamp).getTime();
+      const timeB = new Date(b.timestamp).getTime();
+      return timeB - timeA;
+    });
+    
+    // Return top 20
+    res.json(allAlerts.slice(0, 20));
   } catch (error) {
     console.error("❌ Error fetching alerts:", error);
     res.status(500).json({ error: "Failed to fetch alerts" });
+  }
+});
+
+// Content lineage graph view
+router.get("/lineage", async (_req, res) => {
+  try {
+    const [piracySnapshot, oldAlertsSnapshot] = await Promise.all([
+      db.collection("piracy_alerts").orderBy("timestamp", "desc").limit(200).get(),
+      db.collection("alerts").orderBy("timestamp", "desc").limit(200).get()
+    ]);
+
+    const docs = [...piracySnapshot.docs, ...oldAlertsSnapshot.docs];
+    const nodesMap = new Map<string, any>();
+    const edges: any[] = [];
+
+    for (const doc of docs) {
+      const data = doc.data();
+      const assetId = data.asset_id || `asset_upload_${data.video_id || doc.id}`;
+      const parentAssetId = data.parent_asset_id || null;
+      const sourcePlatform = data.source_platform || data.platform || "unknown";
+      const sourceUrl = data.source_url || data.url || "";
+      const title = data.external_metadata?.title || data.filename || data.video_id || doc.id;
+
+      if (!nodesMap.has(assetId)) {
+        nodesMap.set(assetId, {
+          id: assetId,
+          label: title,
+          platform: sourcePlatform,
+          url: sourceUrl,
+          risk_score: data.risk_score || 0,
+          timestamp: data.timestamp || null,
+        });
+      }
+
+      if (parentAssetId) {
+        if (!nodesMap.has(parentAssetId)) {
+          nodesMap.set(parentAssetId, {
+            id: parentAssetId,
+            label: parentAssetId,
+            platform: "origin",
+            url: "",
+            risk_score: 0,
+            timestamp: null,
+          });
+        }
+        edges.push({
+          id: `${parentAssetId}->${assetId}`,
+          from: parentAssetId,
+          to: assetId,
+          score: data.lineage_score || data.similarity_score || data.confidence || 0,
+          platform: sourcePlatform,
+        });
+      }
+    }
+
+    res.json({
+      nodes: Array.from(nodesMap.values()),
+      edges,
+      generated_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("❌ Error building lineage view:", error);
+    res.status(500).json({ error: "Failed to build lineage view" });
   }
 });
 
@@ -116,23 +243,30 @@ router.get("/propagation", async (req, res) => {
 });
 
 // 🔥 NEW: Enterprise Vertex AI Takedown Generator (Updated SDK)
-router.post("/generate-takedown", async (req, res) => {
+router.post("/generate-takedown", alertsPostRateLimit, requireApiGuard, async (req, res) => {
   try {
     const { video_id, source, misuse_category, misuse_reasoning } = req.body;
+    if (!video_id || !source) {
+      return res.status(400).json({ error: "video_id and source are required" });
+    }
+    const safeVideoId = sanitizeIdentifier(String(video_id), 120);
+    const safeSource = String(source).slice(0, 160);
+    const safeCategory = String(misuse_category || "Copyright Infringement").slice(0, 120);
+    const safeReasoning = String(misuse_reasoning || "Unauthorized broadcast.").slice(0, 1200);
 
     const prompt = `
       You are an expert legal AI representing "NetraX Broadcasting Corporation".
-      Draft a formal, concise DMCA Takedown Notice addressed to the legal department of ${source}.
+      Draft a formal, concise DMCA Takedown Notice addressed to the legal department of ${safeSource}.
       
       Here are the specifics of the copyright infringement:
-      - Video ID/Asset Tracker: ${video_id}
-      - Infringement Classification: ${misuse_category}
-      - Forensic AI Analysis: ${misuse_reasoning}
+      - Video ID/Asset Tracker: ${safeVideoId}
+      - Infringement Classification: ${safeCategory}
+      - Forensic AI Analysis: ${safeReasoning}
 
       Write the letter so it is ready to be sent immediately. Make it sound highly professional, citing the Digital Millennium Copyright Act. Emphasize that the AI analysis confirms this is not fair use.
     `;
 
-    console.log(`🤖 Generating Takedown via Vertex AI for ${source} (${video_id})...`);
+    console.log(`🤖 Generating Takedown via Vertex AI for ${safeSource} (${safeVideoId})...`);
     console.log(`📍 Using project: ${serviceAccount.project_id}, location: us-central1`);
     
     // Use the new SDK generation method with Gemini 2.5 Flash
@@ -170,7 +304,7 @@ function cosineSimilarity(vecA: number[], vecB: number[]) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-router.post("/trigger-scan", async (req, res) => {
+router.post("/trigger-scan", alertsPostRateLimit, requireApiGuard, async (req, res) => {
   try {
     console.log("🚀 [API] Judge triggered Live Scan Simulator...");
 

@@ -28,6 +28,20 @@ def encode_frame_to_base64(frame_array):
     Convert numpy array frame to base64 JPEG for API transmission
     """
     try:
+        # Ensure frame is a proper numpy array
+        if not isinstance(frame_array, np.ndarray):
+            logger.error(f"Frame is not numpy array, got: {type(frame_array)}")
+            return None
+        
+        # Ensure frame has proper dimensions
+        if len(frame_array.shape) != 3:
+            logger.error(f"Frame has wrong shape: {frame_array.shape}")
+            return None
+        
+        # Ensure frame is uint8 (required by OpenCV)
+        if frame_array.dtype != np.uint8:
+            frame_array = frame_array.astype(np.uint8)
+        
         success, buffer = cv2.imencode('.jpg', frame_array, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if success:
             return base64.b64encode(buffer).decode('utf-8')

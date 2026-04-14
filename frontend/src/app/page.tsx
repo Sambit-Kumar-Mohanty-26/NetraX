@@ -14,8 +14,33 @@ interface Alert {
   misuse_reasoning?: string;
   risk_score: number;
   region: string;
-  response: string;
-  level: string;
+  response?: string;
+  level?: string;
+  alert_type?: string;
+  status?: string;
+  filename?: string;
+  url?: string;
+  asset_id?: string;
+  source_platform?: string;
+  source_url?: string;
+  parent_asset_id?: string;
+  lineage_score?: number;
+  // 🌐 NEW: External source fields
+  platform?: string;
+  external_metadata?: {
+    title?: string;
+    author?: string;
+    location?: string;
+    thumbnail_url?: string;
+    detected_at?: string;
+  };
+  similarity_score?: number;
+}
+
+interface ToastMessage {
+  id: number;
+  type: "success" | "error" | "info";
+  message: string;
 }
 
 interface PropagationLink {
@@ -25,9 +50,27 @@ interface PropagationLink {
   similarity: number;
 }
 
+interface LineageNode {
+  id: string;
+  label: string;
+  platform: string;
+  url?: string;
+  risk_score?: number;
+}
+
+interface LineageEdge {
+  id: string;
+  from: string;
+  to: string;
+  score: number;
+  platform: string;
+}
+
 export default function Dashboard() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [propagationLinks, setPropagationLinks] = useState<PropagationLink[]>([]);
+  const [lineageNodes, setLineageNodes] = useState<LineageNode[]>([]);
+  const [lineageEdges, setLineageEdges] = useState<LineageEdge[]>([]);
   const [regionData, setRegionData] = useState<any[]>([]);
   const [soundEnabled, setSoundEnabled] = useState(false);
   const [isWebSocketConnected, setIsWebSocketConnected] = useState(false);
@@ -44,6 +87,9 @@ export default function Dashboard() {
 
   // Simulator State
   const [isScanning, setIsScanning] = useState(false);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [isAlertDetailOpen, setIsAlertDetailOpen] = useState(false);
+  const [isExternalDetailOpen, setIsExternalDetailOpen] = useState(false);
 
   const soundEnabledRef = useRef(false);
   const lastAlertIdRef = useRef<string | null>(null);
@@ -69,6 +115,18 @@ export default function Dashboard() {
   };
   
   const backendUrl = getBackendUrl();
+  const adminApiKey = process.env.NEXT_PUBLIC_ADMIN_API_KEY;
+  const getAdminHeaders = (): Record<string, string> => {
+    return adminApiKey ? { "x-admin-api-key": adminApiKey } : {};
+  };
+
+  const showToast = (type: ToastMessage["type"], message: string) => {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setToasts((prev) => [...prev, { id, type, message }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4500);
+  };
 
   // Sound enablement click listener
   useEffect(() => {
@@ -129,6 +187,7 @@ export default function Dashboard() {
             tag: "critical-alert"
           });
         }
+        showToast("info", `New alert: ${alert.source} (${alert.risk_score}%)`);
         
         return updatedAlerts;
       });
@@ -178,6 +237,13 @@ export default function Dashboard() {
           setPropagationLinks(propData);
         }
 
+        const lineageRes = await fetch(`${backendUrl}/api/lineage`);
+        if (lineageRes.ok) {
+          const lineageData = await lineageRes.json();
+          setLineageNodes(lineageData.nodes || []);
+          setLineageEdges(lineageData.edges || []);
+        }
+
         setTimeout(() => setIsBooting(false), 800); 
       } catch (error) {
         console.error("Failed to fetch data. Is localhost:5000 running?", error);
@@ -201,7 +267,7 @@ export default function Dashboard() {
     try {
       const response = await fetch(`${backendUrl}/api/generate-takedown`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAdminHeaders() },
         body: JSON.stringify({
           video_id: alert.video_id,
           source: alert.source,
@@ -223,12 +289,78 @@ export default function Dashboard() {
     }
   };
 
+  // 🎬 Video Upload Handler (for Judge Demo)
+  const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    showToast("info", `Uploading ${file.name}...`);
+
+    try {
+      const formData = new FormData();
+      formData.append('video', file);
+
+      const response = await fetch(`${backendUrl}/api/upload-test`, {
+        method: 'POST',
+        headers: getAdminHeaders(),
+        body: formData,
+      });
+
+      const data = await response.json();
+      
+      if (data.success) {
+        showToast("success", `Video uploaded: ${data.message}`);
+      } else {
+        throw new Error(data.error || 'Upload failed');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Upload failed";
+      showToast("error", `Upload failed: ${message}`);
+    }
+
+    // Reset input
+    e.target.value = '';
+  };
+
+  // Judge Upload - Add Official Reference Video
+  const handleJudgeUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    showToast("info", `Adding reference: ${file.name}...`);
+
+    try {
+      const formData = new FormData();
+      formData.append('video', file);
+
+      const response = await fetch(`${backendUrl}/api/upload-official`, {
+        method: 'POST',
+        headers: getAdminHeaders(),
+        body: formData,
+      });
+
+      const data = await response.json();
+      
+      if (data.success) {
+        showToast("success", `Reference added: ${data.video_id}`);
+      } else {
+        throw new Error(data.error || 'Upload failed');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Reference upload failed";
+      showToast("error", `Reference upload failed: ${message}`);
+    }
+
+    // Reset input
+    e.target.value = '';
+  };
+
   // Trigger Live Scan
   const handleTriggerScan = async () => {
     setIsScanning(true);
     try {
       await fetch(`${backendUrl}/api/trigger-scan`, {
-        method: "POST"
+        method: "POST",
+        headers: getAdminHeaders(),
       });
     } catch (err) {
       console.error("Failed to trigger scan", err);
@@ -289,8 +421,26 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8 text-gray-900 transition-colors duration-500">
+    <div className="min-h-screen p-8 bg-gray-50 text-gray-900 transition-colors duration-500">
       <style>{customStyles}</style>
+
+      {/* Toast Notifications */}
+      <div className="fixed top-4 right-4 z-[100] space-y-2">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`px-4 py-3 rounded-lg shadow-lg text-sm font-semibold ${
+              toast.type === "success"
+                ? "bg-green-600 text-white"
+                : toast.type === "error"
+                ? "bg-red-600 text-white"
+                : "bg-blue-600 text-white"
+            }`}
+          >
+            {toast.message}
+          </div>
+        ))}
+      </div>
 
       {/* HEADER */}
       <div className="flex justify-between items-center mb-8">
@@ -307,7 +457,26 @@ export default function Dashboard() {
         </div>
 
         {/* RIGHT SIDE: Controls Deck */}
-        <div className="flex items-center gap-5">
+          <div className="flex items-center gap-5">
+          {/* 🎬 JUDGE DEMO: Video Upload Button */}
+          <div className="relative group flex items-center">
+            <label className="flex items-center gap-2 px-5 py-2 rounded-full font-bold text-xs transition-all shadow-sm border bg-green-600 text-white border-green-700 hover:bg-green-500 hover:shadow-lg hover:shadow-green-500/30 cursor-pointer">
+              <span className="text-sm">📤</span>
+              Analyze Video for Piracy
+              <input 
+                type="file" 
+                accept="video/*" 
+                className="hidden" 
+                onChange={handleVideoUpload}
+              />
+            </label>
+            
+            {/* Tooltip */}
+            <div className="absolute right-0 top-12 w-72 p-3 bg-gray-900 text-gray-300 text-[10px] font-mono rounded-lg shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none border border-gray-700">
+              <span className="block text-white font-bold mb-1 font-sans text-xs">For Judges & Reviewers:</span>
+              Upload any video and NetraX will automatically detect if it matches official sports content. Full AI pipeline runs in 5-10 seconds.
+            </div>
+          </div>
           
           {/* 🔥 REDESIGNED: Judge Verification Simulator Button */}
           <div className="relative group flex items-center">
@@ -385,6 +554,32 @@ export default function Dashboard() {
             <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span> Network Intelligence
           </span>
         </div>
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-semibold text-gray-600 bg-gray-100 border border-gray-200 rounded-full px-3 py-1">
+            Nodes: {lineageNodes.length}
+          </span>
+          <span className="text-[11px] font-semibold text-gray-600 bg-gray-100 border border-gray-200 rounded-full px-3 py-1">
+            Links: {lineageEdges.length}
+          </span>
+          {lineageEdges.length > 0 && (
+            <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-100 rounded-full px-3 py-1">
+              Avg Link: {(lineageEdges.reduce((sum, edge) => sum + edge.score, 0) / lineageEdges.length).toFixed(1)}%
+            </span>
+          )}
+        </div>
+
+        {lineageEdges.length > 0 && (
+          <div className="mb-4 text-xs text-gray-500">
+            <span className="font-semibold text-gray-600 mr-2">Recent lineage:</span>
+            {lineageEdges.slice(0, 3).map((edge, idx) => (
+              <span key={edge.id} className="mr-2">
+                {edge.from.slice(0, 10)} → {edge.to.slice(0, 10)} ({edge.score.toFixed(1)}%)
+                {idx < Math.min(lineageEdges.length, 3) - 1 ? " •" : ""}
+              </span>
+            ))}
+          </div>
+        )}
+
         <div className="flex items-center space-x-6 overflow-x-auto pb-4 pt-2 custom-scrollbar">
           {propagationLinks.length === 0 ? (
             <div className="flex items-center gap-3 text-gray-400 italic text-sm py-4">
@@ -394,25 +589,29 @@ export default function Dashboard() {
           ) : (
             propagationLinks.map((link, i) => (
               <div key={link.id} className="flex items-center group animate-new-alert">
-                <div className="bg-gray-50 border border-gray-200 p-3 rounded-lg min-w-[140px] text-center shadow-sm relative overflow-hidden transition-all group-hover:border-blue-300">
+                <div className="bg-gray-50 border border-gray-200 p-3 rounded-lg min-w-[155px] text-center shadow-sm relative overflow-hidden transition-all group-hover:border-blue-300">
                   <div className="absolute top-0 left-0 w-full h-1 bg-gray-300"></div>
                   <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1 mt-1">Source Node</p>
-                  <p className="text-sm font-mono text-gray-700 truncate">{link.parent_id.slice(0, 8)}</p>
+                  <p className="text-sm font-mono text-gray-700 truncate">{link.parent_id.slice(0, 10)}</p>
                 </div>
                 <div className="flex flex-col items-center mx-2 relative">
                   <span className="text-[10px] font-bold text-red-500 mb-1 bg-red-50 px-2 py-0.5 rounded-full">{link.similarity}% match</span>
                   <div className="h-0.5 w-16 bg-red-300 relative overflow-hidden">
-                    <div className="absolute top-0 left-0 h-full w-full bg-red-500 animate-pulse"></div>
+                    <div className="absolute top-0 left-0 h-full w-full bg-red-500"></div>
                     <div className="absolute right-0 -top-1 w-2 h-2 border-t-2 border-r-2 border-red-500 transform rotate-45 z-10"></div>
                   </div>
                 </div>
-                <div className="bg-red-50 border border-red-200 p-3 rounded-lg min-w-[140px] text-center shadow-sm relative overflow-hidden group-hover:shadow-md transition-all group-hover:-translate-y-1 group-hover:border-red-400">
+                <div className="bg-red-50 border border-red-200 p-3 rounded-lg min-w-[155px] text-center shadow-sm relative overflow-hidden group-hover:shadow-md transition-all group-hover:-translate-y-0.5 group-hover:border-red-400">
                   <div className="absolute top-0 left-0 w-full h-1 bg-red-500"></div>
-                  <div className="absolute inset-0 bg-red-500/5 blur-md opacity-0 group-hover:opacity-100 transition-opacity"></div>
-                  <p className="text-[10px] text-red-600 font-bold uppercase tracking-wider mb-1 mt-1 relative z-10">Pirated Clone</p>
-                  <p className="text-sm font-mono text-red-900 truncate relative z-10 font-bold">{link.child_id.slice(0, 8)}</p>
+                  <p className="text-[10px] text-red-600 font-bold uppercase tracking-wider mb-1 mt-1">Pirated Clone</p>
+                  <p className="text-sm font-mono text-red-900 truncate font-bold">{link.child_id.slice(0, 10)}</p>
                 </div>
-                {i !== propagationLinks.length - 1 && <div className="ml-6 mr-2 text-gray-300 h-8 border-l-2 border-dashed"></div>}
+                {i !== propagationLinks.length - 1 && (
+                  <div className="ml-6 mr-2 text-gray-300 h-8 border-l-2 border-dashed"></div>
+                )}
+                <div className="h-2 w-full mt-2 rounded-full bg-gray-100 overflow-hidden hidden">
+                  <div className="h-full rounded-full bg-red-500" style={{ width: `${Math.max(Math.min(link.similarity, 100), 0)}%` }} />
+                </div>
               </div>
             ))
           )}
@@ -459,8 +658,52 @@ export default function Dashboard() {
                         <span className="text-[10px] text-blue-600 font-bold uppercase tracking-wider mb-0.5">Stage 2: Vertex AI</span>
                         <span className="text-sm font-black text-blue-700 flex items-center gap-1">🧠 Embedding: {alert.embedding_score || 'N/A'}%</span>
                       </div>
-                      <div className="ml-auto flex items-center gap-1 text-xs text-blue-600 font-bold bg-blue-50 px-2 py-1 rounded">🌍 {alert.region}</div>
+                      <div className="ml-auto flex items-center gap-1 text-xs text-blue-600 font-bold bg-blue-50 px-2 py-1 rounded">
+                        {alert.platform ? `${alert.platform === 'YouTube' ? '📺' : '🤖'} ${alert.platform}` : `🌍 ${alert.region}`}
+                      </div>
                     </div>
+
+                    {/* 🌐 NEW: External source information */}
+                    {alert.external_metadata && (
+                      <div className="mb-4 bg-gradient-to-r from-orange-50 to-red-50 p-3.5 rounded-md border border-orange-200 shadow-sm">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] bg-orange-600 text-white px-2 py-0.5 rounded uppercase font-bold tracking-wider flex items-center gap-1">
+                              <span className="w-1 h-1 bg-white rounded-full animate-pulse"></span>
+                              {alert.platform === 'YouTube' ? '📺 YouTube' : '🤖 Reddit'} Detection
+                            </span>
+                            <span className="text-sm font-black text-orange-900">{alert.similarity_score?.toFixed(1)}% Match</span>
+                          </div>
+                        </div>
+                        <p className="text-xs text-orange-800 mb-2 font-semibold">
+                          🎬 {alert.external_metadata.title || 'Unknown Title'}
+                        </p>
+                        <p className="text-xs text-orange-700 leading-relaxed">
+                          👤 {alert.external_metadata.author || 'Unknown Author'} • 📍 {alert.external_metadata.location || 'Unknown'}
+                        </p>
+                        {alert.url && (
+                          <div className="mt-2 flex items-center gap-3">
+                            <a 
+                              href={alert.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-blue-600 hover:text-blue-800 underline inline-block"
+                            >
+                              🔗 View Original
+                            </a>
+                            <button
+                              onClick={() => {
+                                setSelectedAlert(alert);
+                                setIsExternalDetailOpen(true);
+                              }}
+                              className="text-xs text-orange-700 font-bold hover:text-orange-900"
+                            >
+                              📄 External Details
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {alert.misuse_category && (
                       <div className="mb-4 bg-gradient-to-r from-purple-50 to-indigo-50 p-3.5 rounded-md border border-purple-100 shadow-sm">
@@ -478,19 +721,48 @@ export default function Dashboard() {
 
                     <div className="flex items-center justify-between mt-4">
                       {/* Action Button */}
-                      <button 
-                        onClick={() => alert.response.includes("TAKEDOWN") ? handleGenerateTakedown(alert) : null}
-                        disabled={!alert.response.includes("TAKEDOWN")}
-                        className={`text-sm font-bold flex items-center gap-1.5 px-3 py-1.5 rounded-md border transition-all ${
-                          alert.response.includes("TAKEDOWN") 
-                            ? "bg-red-50 text-red-600 border-red-200 hover:bg-red-600 hover:text-white cursor-pointer shadow-sm" 
-                            : alert.level === "MEDIUM" 
-                            ? "bg-orange-50 text-orange-600 border-orange-100 cursor-default" 
-                            : "bg-yellow-50 text-yellow-600 border-yellow-100 cursor-default"
-                        }`}
-                      >
-                        {alert.level === "CRITICAL" ? "🚨" : alert.level === "MEDIUM" ? "⚠️" : "ℹ️"} {alert.response}
-                      </button>
+                      {alert.response ? (
+                        <div className="flex items-center gap-2">
+                          <button 
+                            onClick={() => {
+                              setSelectedAlert(alert);
+                              setIsAlertDetailOpen(true);
+                            }}
+                            className="text-sm font-bold flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-gray-200 bg-white text-gray-700 hover:bg-gray-100"
+                          >
+                            👁️ View Details
+                          </button>
+                          <button 
+                            onClick={() => alert.response?.includes("TAKEDOWN") ? handleGenerateTakedown(alert) : null}
+                            disabled={!alert.response?.includes("TAKEDOWN")}
+                            className={`text-sm font-bold flex items-center gap-1.5 px-3 py-1.5 rounded-md border transition-all ${
+                              alert.response?.includes("TAKEDOWN") 
+                                ? "bg-red-50 text-red-600 border-red-200 hover:bg-red-600 hover:text-white cursor-pointer shadow-sm" 
+                                : alert.level === "MEDIUM" 
+                                ? "bg-orange-50 text-orange-600 border-orange-100 cursor-default" 
+                                : "bg-yellow-50 text-yellow-600 border-yellow-100 cursor-default"
+                            }`}
+                          >
+                            {alert.level === "CRITICAL" ? "🚨" : alert.level === "MEDIUM" ? "⚠️" : "ℹ️"} {alert.response}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setSelectedAlert(alert);
+                              setIsAlertDetailOpen(true);
+                            }}
+                            className="text-sm font-bold flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-gray-200 bg-white text-gray-700 hover:bg-gray-100"
+                          >
+                            👁️ View Details
+                          </button>
+                          <span className="text-sm font-bold flex items-center gap-1.5 px-3 py-1.5 rounded-md border bg-green-50 text-green-600 border-green-200">
+                            Clean: {alert.alert_type || "Verified"}
+                          </span>
+                        </div>
+                      )}
+                      
                       
                       <div className="w-1/3 text-right">
                         <div className="flex justify-end text-[10px] text-gray-500 mb-1 font-bold uppercase tracking-wider">
@@ -552,6 +824,48 @@ export default function Dashboard() {
       </div>
 
       {/* TAKEDOWN GENERATOR MODAL */}
+      {isAlertDetailOpen && selectedAlert && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
+          <div className="bg-white w-[650px] rounded-xl p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold text-gray-900">Alert Details</h3>
+              <button onClick={() => setIsAlertDetailOpen(false)} className="text-gray-400 hover:text-gray-700">✕</button>
+            </div>
+            <div className="space-y-2 text-sm text-gray-700">
+              <p><strong>Video ID:</strong> {selectedAlert.video_id}</p>
+              <p><strong>Source:</strong> {selectedAlert.source}</p>
+              <p><strong>Risk Score:</strong> {selectedAlert.risk_score}%</p>
+              <p><strong>Confidence:</strong> {selectedAlert.confidence}%</p>
+              <p><strong>Category:</strong> {selectedAlert.misuse_category || "N/A"}</p>
+              <p><strong>Reasoning:</strong> {selectedAlert.misuse_reasoning || "N/A"}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isExternalDetailOpen && selectedAlert?.external_metadata && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
+          <div className="bg-white w-[700px] rounded-xl p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold text-gray-900">External Source Details</h3>
+              <button onClick={() => setIsExternalDetailOpen(false)} className="text-gray-400 hover:text-gray-700">✕</button>
+            </div>
+            <div className="space-y-2 text-sm text-gray-700">
+              <p><strong>Platform:</strong> {selectedAlert.platform || "N/A"}</p>
+              <p><strong>Title:</strong> {selectedAlert.external_metadata.title || "N/A"}</p>
+              <p><strong>Author:</strong> {selectedAlert.external_metadata.author || "N/A"}</p>
+              <p><strong>Location:</strong> {selectedAlert.external_metadata.location || "N/A"}</p>
+              <p><strong>Similarity:</strong> {selectedAlert.similarity_score?.toFixed(1) || "0"}%</p>
+              {selectedAlert.url && (
+                <a href={selectedAlert.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">
+                  Open Source Link
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {isModalOpen && (
         <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm z-50 flex items-center justify-center animate-in fade-in duration-200">
           <div className="bg-white w-[800px] max-h-[85vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-gray-200">

@@ -1,31 +1,82 @@
 import express, { Router, Request, Response } from "express";
-import { exec } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
 import * as admin from "firebase-admin";
 import fs from "fs";
 import path from "path";
+import {
+  createRateLimiter,
+  requireApiGuard,
+  sanitizeFilename,
+  sanitizeIdentifier,
+} from "../middleware/security";
 
 const router = Router();
-const execAsync = promisify(exec);
 const db = admin.firestore();
+const ingestRateLimit = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 3,
+  keyPrefix: "ingest-route",
+});
+
+function runIngestFromPath(localVideoPath: string, videoId: string): Promise<{ frameCount: number; hashCount: number; stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const pythonPath = path.join(__dirname, "../../../python");
+    const child = spawn("python", ["ingest_from_path.py"], {
+      cwd: pythonPath,
+      env: { ...process.env, VIDEO_PATH: localVideoPath, VIDEO_ID: videoId },
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+    child.on("error", (error) => reject(error));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `Ingest process failed with exit code ${code}`));
+        return;
+      }
+
+      const frameMatches = stdout.match(/Extracted\s+(\d+)\s+frames/i);
+      const hashMatches = stdout.match(/(\d+)\s+reference hashes created/i);
+      const frameCount = frameMatches ? Number(frameMatches[1]) : 0;
+      const hashCount = hashMatches ? Number(hashMatches[1]) : frameCount;
+      resolve({ frameCount, hashCount, stdout });
+    });
+  });
+}
 
 /**
  * POST /api/ingest-official
  * Trigger Python ingestion script to extract frames and generate hashes
  * from an uploaded video file
  */
-router.post("/ingest-official", async (req: Request, res: Response) => {
+router.post("/ingest-official", ingestRateLimit, requireApiGuard, async (req: Request, res: Response) => {
   try {
-    const { videoUrl, videoId, filename, fileSize } = req.body;
+    const { videoUrl, videoId, filename, fileSize } = req.body as {
+      videoUrl?: string;
+      videoId?: string;
+      filename?: string;
+      fileSize?: number;
+    };
 
     if (!videoUrl || !videoId) {
       return res.status(400).json({
         error: "videoUrl and videoId are required"
       });
     }
+    const safeVideoId = sanitizeIdentifier(videoId);
+    if (!safeVideoId) {
+      return res.status(400).json({ error: "Invalid videoId" });
+    }
+    const safeFilename = sanitizeFilename(filename || `${safeVideoId}.mp4`);
 
-    console.log(`\n📹 Starting ingestion for: ${videoId}`);
-    console.log(`   File: ${filename} (${fileSize} bytes)`);
+    console.log(`\n📹 Starting ingestion for: ${safeVideoId}`);
+    console.log(`   File: ${safeFilename} (${fileSize || 0} bytes)`);
 
     // Download video from GCS to temporary location
     const tempDir = "/tmp/netrax-videos";
@@ -33,54 +84,30 @@ router.post("/ingest-official", async (req: Request, res: Response) => {
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    const localVideoPath = path.join(tempDir, `${videoId}.mp4`);
+    const localVideoPath = path.join(tempDir, `${safeVideoId}.mp4`);
 
     console.log(`   🔗 Downloading from GCS...`);
     
-    // Note: In production, you'd download from GCS bucket
-    // For now, we'll simulate the ingestion
+    // Expected format: gs://bucket/object
+    const match = videoUrl.match(/^gs:\/\/([^/]+)\/(.+)$/);
+    if (!match) {
+      return res.status(400).json({ error: "videoUrl must be a gs:// URL" });
+    }
+    const [, bucketName, objectPath] = match;
+    const storage = admin.storage();
+    const bucket = storage.bucket(bucketName);
+    await bucket.file(objectPath).download({ destination: localVideoPath });
     
     // Execute Python ingestion script
     console.log(`   ⚙️  Running frame extraction & hashing...`);
-    
-    const pythonScript = `
-import sys
-sys.path.insert(0, '/app/python')
-from ingest_official import ingest_video
-
-try:
-    frame_count, hash_count = ingest_video("${localVideoPath}", "${videoId}")
-    print(f"SUCCESS:{frame_count}:{hash_count}")
-except Exception as e:
-    print(f"ERROR:{str(e)}")
-`;
-
-    const { stdout, stderr } = await execAsync(
-      `python3 -c "${pythonScript.replace(/"/g, '\\"')}"`,
-      { timeout: 300000 } // 5 minute timeout
-    );
-
-    // Parse output
-    const output = stdout.trim();
-    let frameCount = 0;
-    let hashCount = 0;
-
-    if (output.startsWith("SUCCESS:")) {
-      const parts = output.split(":");
-      frameCount = parseInt(parts[1]) || 0;
-      hashCount = parseInt(parts[2]) || 0;
-      console.log(`   ✅ Ingestion complete: ${frameCount} frames, ${hashCount} hashes`);
-    } else {
-      console.log(`   ⚠️  Fallback: Setting default counts`);
-      frameCount = 100; // Fallback values
-      hashCount = 100;
-    }
+    const { frameCount, hashCount, stdout } = await runIngestFromPath(localVideoPath, safeVideoId);
+    console.log(`   ✅ Ingestion complete: ${frameCount} frames, ${hashCount} hashes`);
 
     // Store ingestion metadata in Firestore
-    const ingestDocId = `ingest_${videoId}_${Date.now()}`;
+    const ingestDocId = `ingest_${safeVideoId}_${Date.now()}`;
     await db.collection("ingestions").doc(ingestDocId).set({
-      videoId,
-      filename,
+      videoId: safeVideoId,
+      filename: safeFilename,
       fileSize,
       frameCount,
       hashCount,
@@ -100,7 +127,7 @@ except Exception as e:
     // Return success response
     return res.json({
       success: true,
-      videoId,
+      videoId: safeVideoId,
       frameCount,
       hashCount,
       processingTime: Math.round(Date.now() / 1000) % 60, // Mock processing time
@@ -115,7 +142,7 @@ except Exception as e:
     // Store error in Firestore
     try {
       await db.collection("ingestions").add({
-        videoId: req.body.videoId || "unknown",
+        videoId: sanitizeIdentifier(String(req.body?.videoId || "unknown")),
         status: "failed",
         error: errorMessage,
         failedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -137,7 +164,11 @@ except Exception as e:
  */
 router.get("/ingest-status/:videoId", async (req: Request, res: Response) => {
   try {
-    const { videoId } = req.params;
+    const rawVideoId = Array.isArray(req.params.videoId) ? req.params.videoId[0] : req.params.videoId;
+    const videoId = sanitizeIdentifier(rawVideoId || "");
+    if (!videoId) {
+      return res.status(400).json({ error: "Invalid videoId" });
+    }
 
     const snapshot = await db.collection("ingestions")
       .where("videoId", "==", videoId)
