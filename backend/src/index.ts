@@ -7,28 +7,45 @@ import alertsRoute from "./routes/alerts";
 import uploadRoute from "./routes/upload";
 import ingestRoute from "./routes/ingest";
 import * as admin from "firebase-admin";
+import { validateAllowedOrigin } from "./middleware/security";
 
 dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  process.env.FRONTEND_URL || "",
+].filter(Boolean);
 
 // Socket.IO WebSocket server
 const io = new Server(server, {
   cors: {
-    origin: [
-      "http://localhost:3000",  // Local development
-      process.env.FRONTEND_URL || "",  // Production (Vercel URL)
-      /\.vercel\.app$/  // Allow all Vercel preview deployments
-    ].filter(Boolean),
+    origin: (origin, callback) => {
+      if (validateAllowedOrigin(origin, allowedOrigins)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("CORS blocked"));
+    },
     methods: ["GET", "POST"],
     credentials: true
   }
 });
 
-// Enable CORS so your Vercel frontend can talk to your Render backend
-app.use(cors());
-app.use(express.json());
+app.use(cors({
+  origin: (origin, callback) => {
+    if (validateAllowedOrigin(origin, allowedOrigins)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error("CORS blocked"));
+  },
+  credentials: true,
+  methods: ["GET", "POST"],
+}));
+app.use(express.json({ limit: "2mb" }));
 
 // Health check endpoint for Render to verify the server is live
 app.get("/", (req, res) => {
@@ -58,7 +75,45 @@ io.on('connection', (socket: Socket) => {
 // Listen to Firestore alerts collection for real-time changes
 const db = admin.firestore();
 
-// Set up real-time listener for new alerts
+// Set up real-time listener for new alerts (WATCH BOTH COLLECTIONS)
+// Listen to piracy_alerts (from Python)
+db.collection("piracy_alerts")
+  .orderBy("timestamp", "desc")
+  .limit(1)
+  .onSnapshot((snapshot) => {
+    snapshot.docChanges().forEach((change) => {
+      if (change.type === "added") {
+        const alert = change.doc.data();
+        console.log(`📨 New piracy alert detected: ${alert.video_id}`);
+        
+        // Convert timestamp and broadcast
+        let timestampDate: Date;
+        if (alert.timestamp) {
+          if (typeof alert.timestamp.toDate === 'function') {
+            timestampDate = alert.timestamp.toDate();
+          } else if (alert.timestamp instanceof Date) {
+            timestampDate = alert.timestamp;
+          } else if (typeof alert.timestamp === 'string') {
+            timestampDate = new Date(alert.timestamp);
+          } else if (alert.timestamp._seconds) {
+            timestampDate = new Date(alert.timestamp._seconds * 1000);
+          } else {
+            timestampDate = new Date();
+          }
+        } else {
+          timestampDate = new Date();
+        }
+        
+        // Broadcast to connected clients
+        io.to('alerts').emit('new-alert', {
+          ...alert,
+          timestamp: timestampDate
+        });
+      }
+    });
+  });
+
+// Also listen to legacy alerts collection
 db.collection("alerts")
   .orderBy("timestamp", "desc")
   .limit(1)
